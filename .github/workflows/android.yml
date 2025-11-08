@@ -15,31 +15,31 @@ jobs:
       APK_PREFIX: NuYouPlus
 
     steps:
-      # 1. Checkout your repo
+      # 1. Checkout repository
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 2. Extract the uploaded NuYou ZIP if present
+      # 2. Extract NuYou project ZIP
       - name: Extract NuYou Project ZIP
         run: |
-          echo "Looking for NuYouPDFTextReplacer_SignedSource.zip..."
-          if [ -f "NuYouPDFTextReplacer_SignedSource.zip" ]; then
-            unzip -q "NuYouPDFTextReplacer_SignedSource.zip" -d extracted
+          echo "Looking for NuYouPDFTextReplacer_Signed.zip..."
+          if [ -f "NuYouPDFTextReplacer_Signed.zip" ]; then
+            unzip -q "NuYouPDFTextReplacer_Signed.zip" -d extracted
             echo "Contents extracted to ./extracted"
             ls -R extracted | head -n 20
             if [ -f extracted/gradlew ]; then
               echo "Moving Gradle project to repo root..."
               mv extracted/* ./
-            elif [ -d extracted/NuYouPDFTextReplacer_SignedSource ]; then
+            elif [ -d extracted/NuYouPDFTextReplacer_Signed ]; then
               echo "Nested folder detected; moving its contents..."
-              mv extracted/NuYouPDFTextReplacer_SignedSource/* ./
+              mv extracted/NuYouPDFTextReplacer_Signed/* ./
             fi
             echo "Extraction complete."
           else
             echo "ZIP not found; skipping extraction."
           fi
 
-      # 3. Verify Gradle project structure
+      # 3. Verify Gradle structure
       - name: Verify Android project present
         run: |
           test -f gradlew || { echo "gradlew not found at repo root"; exit 1; }
@@ -65,20 +65,20 @@ jobs:
             platforms;android-34
             build-tools;34.0.0
 
-      # 6. Print versions (debug info)
+      # 6. Debug version check
       - name: Print Android/Java versions
         run: |
           java -version
           adb version || true
           sdkmanager --version || true
 
-      # 7. Build APK
+      # 7. Build APK (Release or Debug)
       - name: Build (Release if present, else Debug)
         run: |
           ./gradlew --no-daemon :${APP_MODULE}:assembleRelease || \
           ./gradlew --no-daemon :${APP_MODULE}:assembleDebug
 
-      # 8. Find the largest APK output
+      # 8. Collect the largest APK
       - name: Collect APKs
         id: apks
         run: |
@@ -92,7 +92,7 @@ jobs:
           echo "Selected unsigned: $UNSIGNED"
 
       # 9. Zipalign
-      - name: Zipalign (required before signing)
+      - name: Zipalign (prepare before signing)
         run: |
           set -e
           "$ANDROID_HOME/build-tools/${{ env.BUILD_TOOLS }}/zipalign" -p -f 4 \
@@ -100,7 +100,7 @@ jobs:
           echo "ALIGNED_APK=$PWD/aligned.apk" >> $GITHUB_ENV
 
       # 10. Create debug keystore
-      - name: Create debug keystore (for CI signing)
+      - name: Create debug keystore
         run: |
           keytool -genkeypair -v \
             -keystore debug.keystore -storepass android \
@@ -110,7 +110,7 @@ jobs:
           echo "DEBUG_KEYSTORE=$PWD/debug.keystore" >> $GITHUB_ENV
 
       # 11. Sign APK
-      - name: Sign APK (apksigner from build-tools)
+      - name: Sign APK (debug key)
         run: |
           SIGNED="NuYouPlus-Signed.apk"
           "$ANDROID_HOME/build-tools/${{ env.BUILD_TOOLS }}/apksigner" sign \
@@ -122,7 +122,7 @@ jobs:
           "$ANDROID_HOME/build-tools/${{ env.BUILD_TOOLS }}/apksigner" verify --verbose "$SIGNED"
           echo "SIGNED_APK=$PWD/$SIGNED" >> $GITHUB_ENV
 
-      # 12. Upload unsigned artifact
+      # 12. Upload unsigned APK
       - name: Upload unsigned APK
         uses: actions/upload-artifact@v4
         with:
@@ -131,7 +131,7 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      # 13. Upload signed artifact
+      # 13. Upload signed APK
       - name: Upload signed APK (debug keystore)
         uses: actions/upload-artifact@v4
         with:
