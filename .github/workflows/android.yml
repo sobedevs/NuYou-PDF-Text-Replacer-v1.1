@@ -92,4 +92,50 @@ jobs:
           echo "Selected unsigned: $UNSIGNED"
 
       # 9. Zipalign
-      - name: Zipalign (
+      - name: Zipalign (required before signing)
+        run: |
+          set -e
+          "$ANDROID_HOME/build-tools/${{ env.BUILD_TOOLS }}/zipalign" -p -f 4 \
+            "${{ steps.apks.outputs.unsigned }}" aligned.apk
+          echo "ALIGNED_APK=$PWD/aligned.apk" >> $GITHUB_ENV
+
+      # 10. Create debug keystore
+      - name: Create debug keystore (for CI signing)
+        run: |
+          keytool -genkeypair -v \
+            -keystore debug.keystore -storepass android \
+            -alias androiddebugkey -keypass android \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=NuYouPlus,O=NuYouPlus,C=US"
+          echo "DEBUG_KEYSTORE=$PWD/debug.keystore" >> $GITHUB_ENV
+
+      # 11. Sign APK
+      - name: Sign APK (apksigner from build-tools)
+        run: |
+          SIGNED="NuYouPlus-Signed.apk"
+          "$ANDROID_HOME/build-tools/${{ env.BUILD_TOOLS }}/apksigner" sign \
+            --ks "$DEBUG_KEYSTORE" \
+            --ks-pass pass:android \
+            --key-pass pass:android \
+            --out "$SIGNED" \
+            "$ALIGNED_APK"
+          "$ANDROID_HOME/build-tools/${{ env.BUILD_TOOLS }}/apksigner" verify --verbose "$SIGNED"
+          echo "SIGNED_APK=$PWD/$SIGNED" >> $GITHUB_ENV
+
+      # 12. Upload unsigned artifact
+      - name: Upload unsigned APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APK_PREFIX }}-Unsigned.apk
+          path: ${{ steps.apks.outputs.unsigned }}
+          if-no-files-found: error
+          retention-days: 7
+
+      # 13. Upload signed artifact
+      - name: Upload signed APK (debug keystore)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APK_PREFIX }}-Signed.apk
+          path: ${{ env.SIGNED_APK }}
+          if-no-files-found: error
+          retention-days: 7
