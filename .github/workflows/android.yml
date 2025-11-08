@@ -18,7 +18,14 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '17'
-
+          
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          api-level: 34
+          target: default
+          arch: x86_64
+          
       - name: Install unzip & gradle
         run: sudo apt-get update && sudo apt-get install -y unzip gradle
 
