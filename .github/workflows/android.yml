@@ -22,17 +22,17 @@ jobs:
       # 2. Extract the uploaded NuYou ZIP if present
       - name: Extract NuYou Project ZIP
         run: |
-          echo "Looking for NuYou-PDF-Text-Replacer-v1.1-main.zip..."
-          if [ -f "NuYou-PDF-Text-Replacer-v1.1-main.zip" ]; then
-            unzip -q "NuYou-PDF-Text-Replacer-v1.1-main.zip" -d extracted
+          echo "Looking for NuYouPDFTextReplacer_SignedSource.zip..."
+          if [ -f "NuYouPDFTextReplacer_SignedSource.zip" ]; then
+            unzip -q "NuYouPDFTextReplacer_SignedSource.zip" -d extracted
             echo "Contents extracted to ./extracted"
             ls -R extracted | head -n 20
             if [ -f extracted/gradlew ]; then
               echo "Moving Gradle project to repo root..."
               mv extracted/* ./
-            elif [ -d extracted/NuYou-PDF-Text-Replacer-v1.1-main ]; then
+            elif [ -d extracted/NuYouPDFTextReplacer_SignedSource ]; then
               echo "Nested folder detected; moving its contents..."
-              mv extracted/NuYou-PDF-Text-Replacer-v1.1-main/* ./
+              mv extracted/NuYouPDFTextReplacer_SignedSource/* ./
             fi
             echo "Extraction complete."
           else
@@ -92,16 +92,4 @@ jobs:
           echo "Selected unsigned: $UNSIGNED"
 
       # 9. Zipalign
-      - name: Zipalign (required before signing)
-        run: |
-          set -e
-          "$ANDROID_HOME/build-tools/${{ env.BUILD_TOOLS }}/zipalign" -p -f 4 \
-            "${{ steps.apks.outputs.unsigned }}" aligned.apk
-          echo "ALIGNED_APK=$PWD/aligned.apk" >> $GITHUB_ENV
-
-      # 10. Create debug keystore
-      - name: Create debug keystore (for CI signing)
-        run: |
-          keytool -genkeypair -v \
-            -keystore debug.keystore -storepass android \
-            -alias androiddebugkey -keypass android \
+      - name: Zipalign (
