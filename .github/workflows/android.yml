@@ -7,19 +7,18 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+
     env:
-      APK_PREFIX: NuYouPlus
+      ZIP_NAME: NuYou_PDF_Text_Replacer_Signed.zip  # << your zip in repo root
+      EXTRACT_DIR: extracted
       BUILD_TOOLS: 34.0.0
+      COMPILE_SDK: 34
+      APP_MODULE: app
+      APK_PREFIX: NuYouPlus
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Extract NuYou project ZIP
-        run: unzip -q "NuYou_PDF_Text_Replacer_Signed.zip" -d extracted
-
-      - name: Set PROJECT_DIR
-        run: echo "PROJECT_DIR=$(pwd)/extracted" >> $GITHUB_ENV
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -27,12 +26,7 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - name: Install Gradle (no wrapper needed)
-        uses: gradle/actions/setup-gradle@v3
-        with:
-          gradle-version: 8.5
-
-      - name: Android SDK
+      - name: Android SDK (action)
         uses: android-actions/setup-android@v3
         with:
           accept-android-sdk-licenses: true
@@ -41,14 +35,111 @@ jobs:
             platforms;android-34
             build-tools;34.0.0
 
-      - name: Build APK (Release if present, else Debug)
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: gradle assembleRelease || gradle assembleDebug
+      - name: Fallback/Retry SDK packages (best-effort)
+        run: |
+          set -eux
+          yes | sdkmanager --licenses || true
+          yes | sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" || true
 
-      - name: Upload APKs
+      - name: Extract NuYou project ZIP
+        run: |
+          set -eux
+          test -f "${ZIP_NAME}"
+          rm -rf "${EXTRACT_DIR}"
+          mkdir -p "${EXTRACT_DIR}"
+          bsdtar -xf "${ZIP_NAME}" -C "${EXTRACT_DIR}"
+          echo "Tree:"
+          find "${EXTRACT_DIR}" -maxdepth 3 -print
+
+      - name: Confirm Gradle project files
+        run: |
+          set -eux
+          test -f "${EXTRACT_DIR}/settings.gradle"
+          test -f "${EXTRACT_DIR}/build.gradle"
+          test -f "${EXTRACT_DIR}/app/build.gradle"
+
+      # No wrapper in the ZIP? Create one with a managed Gradle!
+      - name: Set up a managed Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+          cache-disabled: true
+
+      - name: Generate Gradle wrapper
+        run: |
+          set -eux
+          gradle -p "${EXTRACT_DIR}" wrapper --gradle-version 8.7
+          chmod +x "${EXTRACT_DIR}/gradlew"
+
+      - name: Print versions
+        run: |
+          java -version
+          "${EXTRACT_DIR}/gradlew" -v
+          sdkmanager --version || true
+          adb version || true
+
+      - name: Build (Release else Debug)
+        working-directory: ${{ env.EXTRACT_DIR }}
+        run: |
+          set -eux
+          ./gradlew --no-daemon :${APP_MODULE}:assembleRelease || ./gradlew --no-daemon :${APP_MODULE}:assembleDebug
+
+      - name: Collect APKs
+        id: apks
+        run: |
+          set -eux
+          OUT="${EXTRACT_DIR}/${APP_MODULE}/build/outputs/apk"
+          echo "Outputs at: $OUT"
+          find "$OUT" -type f -name "*.apk" -printf "%s %p\n" | sort -nr | head -n 20
+          SEL=$(find "$OUT" -type f -name "*.apk" -printf "%s %p\n" | sort -nr | head -n 1 | cut -d' ' -f2-)
+          test -n "$SEL"
+          echo "unsigned=$SEL" >> "$GITHUB_OUTPUT"
+          echo "Selected unsigned: $SEL"
+
+      - name: Zipalign
+        run: |
+          set -eux
+          UNSIGNED="${{ steps.apks.outputs.unsigned }}"
+          ALIGNED="${{ runner.temp }}/${{ env.APK_PREFIX }}-aligned.apk"
+          "$ANDROID_HOME/build-tools/${BUILD_TOOLS}/zipalign" -p -f 4 "$UNSIGNED" "$ALIGNED"
+          echo "ALIGNED_APK=$ALIGNED" >> "$GITHUB_ENV"
+
+      - name: Create debug keystore (CI)
+        run: |
+          set -eux
+          KS="${{ runner.temp }}/debug.keystore"
+          keytool -genkeypair -v \
+            -keystore "$KS" -storepass android \
+            -alias androiddebugkey -keypass android \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US"
+          echo "DEBUG_KEYSTORE=$KS" >> "$GITHUB_ENV"
+
+      - name: Sign APK
+        run: |
+          set -eux
+          SIGNED="${{ runner.temp }}/${{ env.APK_PREFIX }}-Signed.apk"
+          "$ANDROID_HOME/build-tools/${BUILD_TOOLS}/apksigner" sign \
+            --ks "$DEBUG_KEYSTORE" \
+            --ks-pass pass:android \
+            --key-pass pass:android \
+            --out "$SIGNED" \
+            "$ALIGNED_APK"
+          "$ANDROID_HOME/build-tools/${BUILD_TOOLS}/apksigner" verify --verbose "$SIGNED"
+          echo "SIGNED_APK=$SIGNED" >> "$GITHUB_ENV"
+
+      - name: Upload unsigned APK
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.APK_PREFIX }}-Outputs
-          path: |
-            ${{ env.PROJECT_DIR }}/app/build/outputs/apk/**/*.apk
+          name: ${{ env.APK_PREFIX }}-Unsigned.apk
+          path: ${{ steps.apks.outputs.unsigned }}
           if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload signed APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APK_PREFIX }}-Signed.apk
+          path: ${{ env.SIGNED_APK }}
+          if-no-files-found: error
+          retention-days: 7
