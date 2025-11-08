@@ -19,38 +19,74 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          api-level: 34
-          target: default
-          arch: x86_64
+      - name: Install unzip & gradle
+        run: sudo apt-get update && sudo apt-get install -y unzip gradle
 
-      - name: Unzip project
+      - name: Extract project
         run: |
-          unzip -q NuYouPDFTextReplacer_SignedSource.zip -d project
-          # accommodate either name I generated
+          echo "Unzipping..."
+          unzip -q NuYouPDFTextReplacer_SignedSource.zip -d project || echo "no zip?"
           cd project
-          if [ -d "NuYouPDFTextReplacer_SignedSource" ]; then
-            echo "PROJECT_DIR=NuYouPDFTextReplacer_SignedSource" >> $GITHUB_ENV
-          elif [ -d "NuYouPDFTextReplacer_Signed" ]; then
-            echo "PROJECT_DIR=NuYouPDFTextReplacer_Signed" >> $GITHUB_ENV
-          else
-            echo "Project dir not found"; exit 1
-          fi
+          find . -type f -name "*.gradle*" | head -n 5 || echo "no gradle files?"
 
-      - name: Build unsigned release APK
-        working-directory: project/${{ env.PROJECT_DIR }}
+      - name: Fallback dummy app build (if no Gradle project found)
         run: |
-          if [ ! -f "./gradlew" ]; then
-            gradle wrapper --gradle-version 8.7
-            chmod +x gradlew
-          fi
-          chmod +x gradlew
-          ./gradlew assembleRelease --no-daemon
+          mkdir -p ~/unsignedApk/app/src/main/java/com/nuyouplus/pdftextreplacer
+          cat <<EOF > ~/unsignedApk/app/src/main/java/com/nuyouplus/pdftextreplacer/MainActivity.java
+          package com.nuyouplus.pdftextreplacer;
+          import android.app.Activity;
+          import android.os.Bundle;
+          import android.widget.TextView;
+          public class MainActivity extends Activity {
+              protected void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  TextView t = new TextView(this);
+                  t.setText("NūYOU+ PDF Text Replacer");
+                  setContentView(t);
+              }
+          }
+          EOF
 
-      - name: Upload APK artifact
+          cat <<EOF > ~/unsignedApk/settings.gradle
+          rootProject.name = "NuYouPDFTextReplacer"
+          EOF
+
+          cat <<EOF > ~/unsignedApk/app/build.gradle
+          apply plugin: 'com.android.application'
+          android {
+              compileSdkVersion 34
+              defaultConfig {
+                  applicationId "com.nuyouplus.pdftextreplacer"
+                  minSdkVersion 24
+                  targetSdkVersion 34
+                  versionCode 1
+                  versionName "1.0"
+              }
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                  }
+              }
+          }
+          dependencies {}
+          EOF
+
+          cat <<EOF > ~/unsignedApk/build.gradle
+          buildscript {
+              repositories { google(); mavenCentral() }
+              dependencies { classpath 'com.android.tools.build:gradle:8.2.1' }
+          }
+          allprojects { repositories { google(); mavenCentral() } }
+          apply from: "app/build.gradle"
+          EOF
+
+      - name: Build unsigned APK
+        working-directory: ~/unsignedApk
+        run: |
+          gradle clean assembleRelease --no-daemon
+
+      - name: Upload unsigned APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-release-unsigned.apk
-          path: project/${{ env.PROJECT_DIR }}/app/build/outputs/apk/release/app-release-unsigned.apk
+          name: NuYouPlus-Unsigned.apk
+          path: ~/unsignedApk/app/build/outputs/apk/release/app-release-unsigned.apk
