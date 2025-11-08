@@ -1,0 +1,35 @@
+buildscript {
+    repositories { google(); mavenCentral() }
+    dependencies { classpath "com.android.tools.build:gradle:8.5.0" }
+}
+
+allprojects { repositories { google(); mavenCentral() } }
+
+// Auto-generate a generic keystore on first build if missing
+gradle.projectsEvaluated {
+    def ksFile = file("app/keystore/nuyouplus-generic.jks")
+    tasks.matching { it.name == "preBuild" }.all { t ->
+        t.doFirst {
+            if (!ksFile.exists()) {
+                ksFile.parentFile.mkdirs()
+                println("[NuYou] Generating generic release keystore...")
+                def cmd = [
+                    "keytool",
+                    "-genkeypair",
+                    "-keystore", ksFile.absolutePath,
+                    "-storepass", "nuyou2025",
+                    "-keypass", "nuyou2025",
+                    "-alias", "nuyou",
+                    "-keyalg", "RSA",
+                    "-keysize", "2048",
+                    "-validity", "9125",
+                    "-dname", "CN=NuYou Generic,O=NuYou Plus,L=Miami,ST=FL,C=US"
+                ]
+                exec { commandLine cmd }
+                println("[NuYou] Keystore created at: " + ksFile.absolutePath)
+            }
+        }
+    }
+}
+
+task clean(type: Delete) { delete rootProject.buildDir }

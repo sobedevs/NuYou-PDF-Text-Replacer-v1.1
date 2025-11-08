@@ -1,0 +1,2 @@
+rootProject.name = "NuYouPDFTextReplacer_Signed"
+include(":app")
