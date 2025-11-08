@@ -35,16 +35,19 @@ jobs:
           echo "Gradle files found under ./project (if any):"
           find project -maxdepth 3 -type f -name "build.gradle*" -o -name "settings.gradle" || true
 
+      # Always create a minimal fallback app so we can produce an unsigned APK
       - name: Prepare fallback NuYou+ app
         run: |
           PROJECT_DIR="${GITHUB_WORKSPACE}/unsignedApk"
           mkdir -p "${PROJECT_DIR}/app/src/main/java/com/nuyouplus/pdftextreplacer"
 
+          # Settings
           cat > "${PROJECT_DIR}/settings.gradle" <<'EOF'
           rootProject.name = "NuYouPDFTextReplacer"
           include(":app")
           EOF
 
+          # Root build.gradle (AGP 8.2.1)
           cat > "${PROJECT_DIR}/build.gradle" <<'EOF'
           buildscript {
             repositories { google(); mavenCentral() }
@@ -53,6 +56,7 @@ jobs:
           allprojects { repositories { google(); mavenCentral() } }
           EOF
 
+          # App module build.gradle
           cat > "${PROJECT_DIR}/app/build.gradle" <<'EOF'
           apply plugin: 'com.android.application'
           android {
@@ -70,11 +74,14 @@ jobs:
           dependencies { }
           EOF
 
+          # AndroidManifest with exported=true for Android 12+
           cat > "${PROJECT_DIR}/app/src/main/AndroidManifest.xml" <<'EOF'
           <manifest xmlns:android="http://schemas.android.com/apk/res/android"
               package="com.nuyouplus.pdftextreplacer">
             <application android:label="NūYOU+ PDF Text Replacer">
-              <activity android:name=".MainActivity">
+              <activity
+                  android:name=".MainActivity"
+                  android:exported="true">
                 <intent-filter>
                   <action android:name="android.intent.action.MAIN"/>
                   <category android:name="android.intent.category.LAUNCHER"/>
@@ -84,6 +91,7 @@ jobs:
           </manifest>
           EOF
 
+          # Simple Activity
           cat > "${PROJECT_DIR}/app/src/main/java/com/nuyouplus/pdftextreplacer/MainActivity.java" <<'EOF'
           package com.nuyouplus.pdftextreplacer;
           import android.app.Activity;
@@ -108,7 +116,7 @@ jobs:
         run: |
           wget https://services.gradle.org/distributions/gradle-8.2.1-bin.zip
           unzip -q gradle-8.2.1-bin.zip -d $HOME/gradle
-          export PATH="$HOME/gradle/gradle-8.2.1/bin:$PATH"
+          echo "$HOME/gradle/gradle-8.2.1/bin" >> $GITHUB_PATH
           gradle -v
 
       - name: Build unsigned APK
