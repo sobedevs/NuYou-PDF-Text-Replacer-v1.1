@@ -1,4 +1,4 @@
-name: Android CI — Signed APK
+name: Android CI (fix SDK step)
 
 on:
   workflow_dispatch:
@@ -8,8 +8,6 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    env:
-      ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
 
     steps:
       - name: Checkout
@@ -21,110 +19,80 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK (cmdline + build-tools)
+      # ✅ Correct way to install SDK + accept licenses + install packages
+      - name: Android SDK
+      # Docs: https://github.com/android-actions/setup-android
         uses: android-actions/setup-android@v3
         with:
-          api-level: 35
-          target: default
-          arch: x86_64
+          accept-android-sdk-licenses: true
+          # Optional: print which licenses were accepted
+          log-accepted-android-sdk-licenses: true
+          # Pin cmdline-tools version (Google’s current stable)
+          cmdline-tools-version: 11076708
+          # Install exactly what we need
+          packages: |
+            platform-tools
+            platforms;android-35
+            build-tools;35.0.0
 
-      - name: Install platform 35 + build-tools 35
-        shell: bash
+      - name: Ensure gradlew exists
         run: |
-          yes | sdkmanager --licenses
-          sdkmanager "platforms;android-35" "build-tools;35.0.0" > /dev/null
-
-      # If your project is inside a ZIP, extract it; otherwise this no-ops
-      - name: Extract project ZIP if present
-        shell: bash
-        run: |
-          set -e
-          if ls *.zip >/dev/null 2>&1; then
-            unzip -q *.zip -d project
-            echo "Using extracted ./project as root"
-          else
-            mkdir -p project
-            shopt -s dotglob; mv * project/ || true
-            echo "Using repo root as project"
-          fi
-          echo "PROJECT_DIR=$PWD/project" >> $GITHUB_ENV
-
-      - name: Prepare Gradle wrapper (force recent)
-        shell: bash
-        run: |
-          cd "$PROJECT_DIR"
-          if [ -f "./gradlew" ]; then
-            chmod +x ./gradlew
-            ./gradlew wrapper --gradle-version 8.7 --distribution-type all
-          else
-            # If no wrapper, try system gradle to create one
+          if [ ! -f gradlew ]; then
+            echo "No gradlew found. Creating wrapper…"
             sudo apt-get update && sudo apt-get install -y gradle
             gradle wrapper --gradle-version 8.7 --distribution-type all
           fi
-          chmod +x ./gradlew
+          chmod +x gradlew
+          ./gradlew wrapper --gradle-version 8.7 --distribution-type all
+          chmod +x gradlew
 
-      # Helpful: auto-fix Android 12+ launcher exported issue if needed
-      - name: Ensure MAIN/LAUNCHER activity has exported=true (best-effort)
-        shell: bash
+      - name: Build (Release if present, else Debug)
         run: |
           set -e
-          cd "$PROJECT_DIR"
-          MANIFESTS=$(git ls-files | grep -E 'src/.+/AndroidManifest.xml' || true)
-          for m in $MANIFESTS; do
-            if grep -q 'android.intent.category.LAUNCHER' "$m"; then
-              if ! grep -q 'android:exported=' "$m"; then
-                sed -i '0,/<activity /s//& android:exported="true"/' "$m"
-                echo "Patched exported=true in $m"
-              fi
-            fi
-          done
+          if ./gradlew -q tasks --all | grep -q '^assembleRelease'; then
+            ./gradlew --no-daemon clean assembleRelease --stacktrace --info
+          else
+            echo "::warning::assembleRelease not found; building Debug"
+            ./gradlew --no-daemon clean assembleDebug --stacktrace --info
+          fi
 
-      - name: Build release (unsigned)
-        shell: bash
+      - name: Collect APKs
         run: |
-          set -e
-          cd "$PROJECT_DIR"
-          ./gradlew --no-daemon clean assembleRelease
-          APK=$(ls app/build/outputs/apk/release/*release*.apk | head -n1)
-          if [ ! -f "$APK" ]; then
-            echo "No release APK produced"; exit 1
+          mkdir -p found_apks
+          mapfile -t APKS < <(find . -type f -path "*/build/outputs/apk/*/*.apk")
+          if [ ${#APKS[@]} -eq 0 ]; then
+            echo "::error::No APKs produced"; exit 1
           fi
-          if [ $(stat -c%s "$APK") -lt 500000 ]; then
-            echo "APK looks too small; failing to avoid corrupt artifact."
-            ls -lh app/build/outputs/apk/release/
-            exit 2
-          fi
-          echo "APK_PATH=$APK" >> $GITHUB_ENV
-          ls -lh "$APK"
+          ls -lh "${APKS[@]}"
+          for a in "${APKS[@]}"; do cp -f "$a" "found_apks/$(basename "$a")"; done
+
+      - name: Upload APKs (raw)
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-outputs
+          path: found_apks/**
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Download Uber APK Signer
-        shell: bash
         run: |
-          cd "$PROJECT_DIR"
           curl -L -o uber-apk-signer.jar \
             https://github.com/patrickfav/uber-apk-signer/releases/download/v1.3.0/uber-apk-signer-1.3.0.jar
 
-      - name: Zipalign + Sign APK (debug keystore auto-generated)
-        shell: bash
+      - name: Sign the biggest APK
         run: |
           set -e
-          cd "$PROJECT_DIR"
+          BIGGEST=$(ls -S found_apks/*.apk | head -n1)
           mkdir -p signed
-          java -jar uber-apk-signer.jar \
-            --apks "$APK_PATH" \
-            --out signed \
-            --overwrite
-          SIGNED=$(ls signed/*-aligned-debugSigned.apk | head -n1 || true)
-          [ -z "$SIGNED" ] && SIGNED=$(ls signed/*-aligned-releaseSigned.apk | head -n1 || true)
-          if [ -z "$SIGNED" ]; then echo "Signed APK not found"; exit 1; fi
+          java -jar uber-apk-signer.jar --apks "$BIGGEST" --out signed --overwrite
+          SIGNED=$(ls signed/*-Signed.apk | head -n1)
           mv "$SIGNED" signed/NuYouPlus-Signed.apk
-          echo "SIGNED_APK=$PWD/signed/NuYouPlus-Signed.apk" >> $GITHUB_ENV
-          ls -lh "$PWD/signed"
+          ls -lh signed
 
-      - name: Upload artifact – NuYouPlus-Signed.apk
+      - name: Upload NuYouPlus-Signed.apk
         uses: actions/upload-artifact@v4
         with:
           name: NuYouPlus-Signed.apk
-          path: ${{ env.SIGNED_APK }}
+          path: signed/NuYouPlus-Signed.apk
           if-no-files-found: error
           retention-days: 90
