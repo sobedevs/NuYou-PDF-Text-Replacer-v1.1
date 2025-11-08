@@ -7,118 +7,114 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     env:
-      ZIP_NAME: NuYou_PDF_Text_Replacer_Signed.zip  # << your zip in repo root
-      EXTRACT_DIR: extracted
-      BUILD_TOOLS: 34.0.0
-      COMPILE_SDK: 34
+      ZIP_NAME: NuYou_PDF_Text_Replacer_Signed.zip
+      APP_DIR: extracted
       APP_MODULE: app
+      ANDROID_API: 33
+      BUILD_TOOLS: 33.0.2
       APK_PREFIX: NuYouPlus
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # --- JDK for Android/Gradle ---
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
 
+      # --- Android SDK (use stable, known-good packages) ---
       - name: Android SDK (action)
         uses: android-actions/setup-android@v3
         with:
           accept-android-sdk-licenses: true
           packages: |
             platform-tools
-            platforms;android-34
-            build-tools;34.0.0
+            platforms;android-${{ env.ANDROID_API }}
+            build-tools;${{ env.BUILD_TOOLS }}
 
-      - name: Fallback/Retry SDK packages (best-effort)
-        run: |
-          set -eux
-          yes | sdkmanager --licenses || true
-          yes | sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" || true
-
+      # --- Unzip the provided project into ./extracted ---
       - name: Extract NuYou project ZIP
         run: |
-          set -eux
-          test -f "${ZIP_NAME}"
-          rm -rf "${EXTRACT_DIR}"
-          mkdir -p "${EXTRACT_DIR}"
-          bsdtar -xf "${ZIP_NAME}" -C "${EXTRACT_DIR}"
-          echo "Tree:"
-          find "${EXTRACT_DIR}" -maxdepth 3 -print
+          test -f "$ZIP_NAME" || { echo "ZIP $ZIP_NAME not found at repo root"; exit 1; }
+          rm -rf "$APP_DIR"
+          mkdir -p "$APP_DIR"
+          unzip -q -o "$ZIP_NAME" -d "$APP_DIR"
 
+      # --- Sanity check that it looks like a Gradle Android project ---
       - name: Confirm Gradle project files
         run: |
-          set -eux
-          test -f "${EXTRACT_DIR}/settings.gradle"
-          test -f "${EXTRACT_DIR}/build.gradle"
-          test -f "${EXTRACT_DIR}/app/build.gradle"
+          ls -lah "$APP_DIR"
+          test -f "$APP_DIR/build.gradle" || { echo "missing root build.gradle"; exit 1; }
+          test -f "$APP_DIR/settings.gradle" || { echo "missing settings.gradle"; exit 1; }
+          test -f "$APP_DIR/gradle.properties" || { echo "missing gradle.properties"; exit 1; }
+          test -f "$APP_DIR/${APP_MODULE}/build.gradle" || { echo "missing app/build.gradle"; exit 1; }
 
-      # No wrapper in the ZIP? Create one with a managed Gradle!
+      # --- If gradle wrapper is missing, generate one (install gradle once via apt) ---
       - name: Set up a managed Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: 8.7
-          cache-disabled: true
-
-      - name: Generate Gradle wrapper
         run: |
-          set -eux
-          gradle -p "${EXTRACT_DIR}" wrapper --gradle-version 8.7
-          chmod +x "${EXTRACT_DIR}/gradlew"
+          if [ ! -f "$APP_DIR/gradlew" ]; then
+            sudo apt-get update
+            sudo apt-get install -y gradle
+            (cd "$APP_DIR" && gradle -v && gradle wrapper --gradle-version 8.7)
+          fi
+          chmod +x "$APP_DIR/gradlew"
+
+      - name: Generate Gradle wrapper (best-effort)
+        run: |
+          # If the previous step created it, this is a no-op; if it already existed, also fine.
+          test -f "$APP_DIR/gradlew" || (cd "$APP_DIR" && gradle wrapper --gradle-version 8.7 || true)
+          chmod +x "$APP_DIR/gradlew"
 
       - name: Print versions
         run: |
           java -version
-          "${EXTRACT_DIR}/gradlew" -v
-          sdkmanager --version || true
           adb version || true
+          sdkmanager --version
+          (cd "$APP_DIR" && ./gradlew --version)
 
+      # --- Build (prefer Release; fall back to Debug) ---
       - name: Build (Release else Debug)
-        working-directory: ${{ env.EXTRACT_DIR }}
+        working-directory: extracted
         run: |
-          set -eux
+          set -e
           ./gradlew --no-daemon :${APP_MODULE}:assembleRelease || ./gradlew --no-daemon :${APP_MODULE}:assembleDebug
 
+      # --- Find the biggest APK produced (unsigned/signed depending on project config) ---
       - name: Collect APKs
         id: apks
         run: |
-          set -eux
-          OUT="${EXTRACT_DIR}/${APP_MODULE}/build/outputs/apk"
-          echo "Outputs at: $OUT"
+          OUT="$(pwd)/${APP_DIR}/${APP_MODULE}/build/outputs/apk"
+          echo "Outputs @ $OUT"
           find "$OUT" -type f -name "*.apk" -printf "%s %p\n" | sort -nr | head -n 20
-          SEL=$(find "$OUT" -type f -name "*.apk" -printf "%s %p\n" | sort -nr | head -n 1 | cut -d' ' -f2-)
-          test -n "$SEL"
-          echo "unsigned=$SEL" >> "$GITHUB_OUTPUT"
-          echo "Selected unsigned: $SEL"
+          APK_PATH="$(find "$OUT" -type f -name "*.apk" -printf "%s %p\n" | sort -nr | head -n 1 | cut -d' ' -f2-)"
+          test -n "$APK_PATH"
+          echo "apk=$APK_PATH" >> $GITHUB_OUTPUT
+          echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
 
+      # --- Zipalign + sign with debug keystore so you get an installable APK even if project builds unsigned ---
       - name: Zipalign
         run: |
-          set -eux
-          UNSIGNED="${{ steps.apks.outputs.unsigned }}"
-          ALIGNED="${{ runner.temp }}/${{ env.APK_PREFIX }}-aligned.apk"
-          "$ANDROID_HOME/build-tools/${BUILD_TOOLS}/zipalign" -p -f 4 "$UNSIGNED" "$ALIGNED"
-          echo "ALIGNED_APK=$ALIGNED" >> "$GITHUB_ENV"
+          ALIGNED="${RUNNER_TEMP}/${APK_PREFIX}-aligned.apk"
+          "$ANDROID_HOME/build-tools/${BUILD_TOOLS}/zipalign" -p -f 4 "$APK_PATH" "$ALIGNED"
+          echo "ALIGNED_APK=$ALIGNED" >> $GITHUB_ENV
 
       - name: Create debug keystore (CI)
         run: |
-          set -eux
-          KS="${{ runner.temp }}/debug.keystore"
+          KEYSTORE="${RUNNER_TEMP}/debug.keystore"
           keytool -genkeypair -v \
-            -keystore "$KS" -storepass android \
+            -keystore "$KEYSTORE" -storepass android \
             -alias androiddebugkey -keypass android \
             -keyalg RSA -keysize 2048 -validity 10000 \
             -dname "CN=Android Debug,O=Android,C=US"
-          echo "DEBUG_KEYSTORE=$KS" >> "$GITHUB_ENV"
+          echo "DEBUG_KEYSTORE=$KEYSTORE" >> $GITHUB_ENV
 
       - name: Sign APK
         run: |
-          set -eux
-          SIGNED="${{ runner.temp }}/${{ env.APK_PREFIX }}-Signed.apk"
+          SIGNED="${RUNNER_TEMP}/${APK_PREFIX}-Signed.apk"
           "$ANDROID_HOME/build-tools/${BUILD_TOOLS}/apksigner" sign \
             --ks "$DEBUG_KEYSTORE" \
             --ks-pass pass:android \
@@ -126,17 +122,20 @@ jobs:
             --out "$SIGNED" \
             "$ALIGNED_APK"
           "$ANDROID_HOME/build-tools/${BUILD_TOOLS}/apksigner" verify --verbose "$SIGNED"
-          echo "SIGNED_APK=$SIGNED" >> "$GITHUB_ENV"
+          echo "SIGNED_APK=$SIGNED" >> $GITHUB_ENV
 
-      - name: Upload unsigned APK
+      # --- Upload artifacts ---
+      - name: Upload raw APK(s) from build
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.APK_PREFIX }}-Unsigned.apk
-          path: ${{ steps.apks.outputs.unsigned }}
-          if-no-files-found: error
+          name: Raw-APKs
+          path: |
+            ${{ env.APK_PATH }}
+            extracted/**/outputs/apk/**/*.apk
+          if-no-files-found: warn
           retention-days: 7
 
-      - name: Upload signed APK
+      - name: Upload signed APK (installable)
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.APK_PREFIX }}-Signed.apk
