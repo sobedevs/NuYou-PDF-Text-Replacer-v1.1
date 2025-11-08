@@ -1,4 +1,4 @@
-name: Android CI (Unsigned APK)
+name: Android CI — Signed APK
 
 on:
   workflow_dispatch:
@@ -8,125 +8,123 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up JDK
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
+          distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
+      - name: Set up Android SDK (cmdline + build-tools)
         uses: android-actions/setup-android@v3
         with:
-          api-level: 34
+          api-level: 35
           target: default
           arch: x86_64
 
-      - name: Install unzip
-        run: sudo apt-get update && sudo apt-get install -y unzip
-
-      - name: Extract project (if ZIP has Gradle app)
+      - name: Install platform 35 + build-tools 35
+        shell: bash
         run: |
-          unzip -q NuYouPDFTextReplacer_SignedSource.zip -d project || echo "ZIP not found or already extracted"
-          echo "Gradle files found under ./project (if any):"
-          find project -maxdepth 3 -type f -name "build.gradle*" -o -name "settings.gradle" || true
+          yes | sdkmanager --licenses
+          sdkmanager "platforms;android-35" "build-tools;35.0.0" > /dev/null
 
-      # Always create a minimal fallback app so we can produce an unsigned APK
-      - name: Prepare fallback NuYou+ app
+      # If your project is inside a ZIP, extract it; otherwise this no-ops
+      - name: Extract project ZIP if present
+        shell: bash
         run: |
-          PROJECT_DIR="${GITHUB_WORKSPACE}/unsignedApk"
-          mkdir -p "${PROJECT_DIR}/app/src/main/java/com/nuyouplus/pdftextreplacer"
+          set -e
+          if ls *.zip >/dev/null 2>&1; then
+            unzip -q *.zip -d project
+            echo "Using extracted ./project as root"
+          else
+            mkdir -p project
+            shopt -s dotglob; mv * project/ || true
+            echo "Using repo root as project"
+          fi
+          echo "PROJECT_DIR=$PWD/project" >> $GITHUB_ENV
 
-          # Settings
-          cat > "${PROJECT_DIR}/settings.gradle" <<'EOF'
-          rootProject.name = "NuYouPDFTextReplacer"
-          include(":app")
-          EOF
-
-          # Root build.gradle (AGP 8.2.1)
-          cat > "${PROJECT_DIR}/build.gradle" <<'EOF'
-          buildscript {
-            repositories { google(); mavenCentral() }
-            dependencies { classpath 'com.android.tools.build:gradle:8.2.1' }
-          }
-          allprojects { repositories { google(); mavenCentral() } }
-          EOF
-
-          # App module build.gradle
-          cat > "${PROJECT_DIR}/app/build.gradle" <<'EOF'
-          apply plugin: 'com.android.application'
-          android {
-            namespace "com.nuyouplus.pdftextreplacer"
-            compileSdkVersion 34
-            defaultConfig {
-              applicationId "com.nuyouplus.pdftextreplacer"
-              minSdkVersion 24
-              targetSdkVersion 34
-              versionCode 1
-              versionName "1.0"
-            }
-            buildTypes { release { minifyEnabled false } }
-          }
-          dependencies { }
-          EOF
-
-          # AndroidManifest with exported=true for Android 12+
-          cat > "${PROJECT_DIR}/app/src/main/AndroidManifest.xml" <<'EOF'
-          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-              package="com.nuyouplus.pdftextreplacer">
-            <application android:label="NūYOU+ PDF Text Replacer">
-              <activity
-                  android:name=".MainActivity"
-                  android:exported="true">
-                <intent-filter>
-                  <action android:name="android.intent.action.MAIN"/>
-                  <category android:name="android.intent.category.LAUNCHER"/>
-                </intent-filter>
-              </activity>
-            </application>
-          </manifest>
-          EOF
-
-          # Simple Activity
-          cat > "${PROJECT_DIR}/app/src/main/java/com/nuyouplus/pdftextreplacer/MainActivity.java" <<'EOF'
-          package com.nuyouplus.pdftextreplacer;
-          import android.app.Activity;
-          import android.os.Bundle;
-          import android.widget.TextView;
-          public class MainActivity extends Activity {
-            protected void onCreate(Bundle b) {
-              super.onCreate(b);
-              TextView t = new TextView(this);
-              t.setText("NūYOU+ PDF Text Replacer");
-              t.setTextSize(22f);
-              t.setPadding(60, 200, 60, 60);
-              setContentView(t);
-            }
-          }
-          EOF
-
-          echo "== Project tree =="
-          ls -R "${PROJECT_DIR}"
-
-      - name: Download and use Gradle 8.2.1
+      - name: Prepare Gradle wrapper (force recent)
+        shell: bash
         run: |
-          wget https://services.gradle.org/distributions/gradle-8.2.1-bin.zip
-          unzip -q gradle-8.2.1-bin.zip -d $HOME/gradle
-          echo "$HOME/gradle/gradle-8.2.1/bin" >> $GITHUB_PATH
-          gradle -v
+          cd "$PROJECT_DIR"
+          if [ -f "./gradlew" ]; then
+            chmod +x ./gradlew
+            ./gradlew wrapper --gradle-version 8.7 --distribution-type all
+          else
+            # If no wrapper, try system gradle to create one
+            sudo apt-get update && sudo apt-get install -y gradle
+            gradle wrapper --gradle-version 8.7 --distribution-type all
+          fi
+          chmod +x ./gradlew
 
-      - name: Build unsigned APK
+      # Helpful: auto-fix Android 12+ launcher exported issue if needed
+      - name: Ensure MAIN/LAUNCHER activity has exported=true (best-effort)
+        shell: bash
         run: |
-          PROJECT_DIR="${GITHUB_WORKSPACE}/unsignedApk"
-          cd "${PROJECT_DIR}"
-          gradle clean assembleRelease --no-daemon
+          set -e
+          cd "$PROJECT_DIR"
+          MANIFESTS=$(git ls-files | grep -E 'src/.+/AndroidManifest.xml' || true)
+          for m in $MANIFESTS; do
+            if grep -q 'android.intent.category.LAUNCHER' "$m"; then
+              if ! grep -q 'android:exported=' "$m"; then
+                sed -i '0,/<activity /s//& android:exported="true"/' "$m"
+                echo "Patched exported=true in $m"
+              fi
+            fi
+          done
 
-      - name: Upload unsigned APK
+      - name: Build release (unsigned)
+        shell: bash
+        run: |
+          set -e
+          cd "$PROJECT_DIR"
+          ./gradlew --no-daemon clean assembleRelease
+          APK=$(ls app/build/outputs/apk/release/*release*.apk | head -n1)
+          if [ ! -f "$APK" ]; then
+            echo "No release APK produced"; exit 1
+          fi
+          if [ $(stat -c%s "$APK") -lt 500000 ]; then
+            echo "APK looks too small; failing to avoid corrupt artifact."
+            ls -lh app/build/outputs/apk/release/
+            exit 2
+          fi
+          echo "APK_PATH=$APK" >> $GITHUB_ENV
+          ls -lh "$APK"
+
+      - name: Download Uber APK Signer
+        shell: bash
+        run: |
+          cd "$PROJECT_DIR"
+          curl -L -o uber-apk-signer.jar \
+            https://github.com/patrickfav/uber-apk-signer/releases/download/v1.3.0/uber-apk-signer-1.3.0.jar
+
+      - name: Zipalign + Sign APK (debug keystore auto-generated)
+        shell: bash
+        run: |
+          set -e
+          cd "$PROJECT_DIR"
+          mkdir -p signed
+          java -jar uber-apk-signer.jar \
+            --apks "$APK_PATH" \
+            --out signed \
+            --overwrite
+          SIGNED=$(ls signed/*-aligned-debugSigned.apk | head -n1 || true)
+          [ -z "$SIGNED" ] && SIGNED=$(ls signed/*-aligned-releaseSigned.apk | head -n1 || true)
+          if [ -z "$SIGNED" ]; then echo "Signed APK not found"; exit 1; fi
+          mv "$SIGNED" signed/NuYouPlus-Signed.apk
+          echo "SIGNED_APK=$PWD/signed/NuYouPlus-Signed.apk" >> $GITHUB_ENV
+          ls -lh "$PWD/signed"
+
+      - name: Upload artifact – NuYouPlus-Signed.apk
         uses: actions/upload-artifact@v4
         with:
-          name: NuYouPlus-Unsigned.apk
-          path: ${{ github.workspace }}/unsignedApk/app/build/outputs/apk/release/app-release-unsigned.apk
+          name: NuYouPlus-Signed.apk
+          path: ${{ env.SIGNED_APK }}
+          if-no-files-found: error
+          retention-days: 90
