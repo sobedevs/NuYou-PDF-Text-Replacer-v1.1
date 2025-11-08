@@ -7,114 +7,144 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+
     env:
       ZIP_NAME: NuYou_PDF_Text_Replacer_Signed.zip
-      APP_DIR: extracted
+      PROJECT_DIR: extracted
       APP_MODULE: app
-      ANDROID_API: 33
+      ANDROID_HOME: /usr/local/lib/android/sdk
       BUILD_TOOLS: 33.0.2
+      PLATFORM_API: 33
       APK_PREFIX: NuYouPlus
 
     steps:
-      - name: Checkout
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      # --- JDK for Android/Gradle ---
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
 
-      # --- Android SDK (use stable, known-good packages) ---
-      - name: Android SDK (action)
-        uses: android-actions/setup-android@v3
-        with:
-          accept-android-sdk-licenses: true
-          packages: |
-            platform-tools
-            platforms;android-${{ env.ANDROID_API }}
-            build-tools;${{ env.BUILD_TOOLS }}
+      # ---------- Install Android SDK (manual, reliable) ----------
+      - name: Install Android SDK (manual)
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo mkdir -p "$ANDROID_HOME"
+          sudo chown -R $USER:$USER "$ANDROID_HOME"
+          mkdir -p "$ANDROID_HOME/cmdline-tools"
+          cd "$ANDROID_HOME/cmdline-tools"
 
-      # --- Unzip the provided project into ./extracted ---
+          # Download Google cmdline tools (working build)
+          curl -sSL https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -o cmdtools.zip
+          unzip -q cmdtools.zip -d latest
+          rm -f cmdtools.zip
+
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$ANDROID_HOME" --licenses
+
+          # Install platform-tools, chosen platform & build-tools
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$ANDROID_HOME" \
+            "platform-tools" "platforms;android-${PLATFORM_API}" "build-tools;${BUILD_TOOLS}"
+
+          echo "SDK installed at $ANDROID_HOME"
+          "$ANDROID_HOME/platform-tools/adb" version || true
+
+      # ---------- Unpack your Android project ZIP ----------
       - name: Extract NuYou project ZIP
+        shell: bash
         run: |
-          test -f "$ZIP_NAME" || { echo "ZIP $ZIP_NAME not found at repo root"; exit 1; }
-          rm -rf "$APP_DIR"
-          mkdir -p "$APP_DIR"
-          unzip -q -o "$ZIP_NAME" -d "$APP_DIR"
+          set -e
+          test -f "$ZIP_NAME" || { echo "ZIP not found: $ZIP_NAME"; exit 1; }
+          rm -rf "$PROJECT_DIR"
+          mkdir -p "$PROJECT_DIR"
+          unzip -q "$ZIP_NAME" -d "$PROJECT_DIR"
+          echo "Extracted:"
+          find "$PROJECT_DIR" -maxdepth 2 -type f -printf "%P\n"
 
-      # --- Sanity check that it looks like a Gradle Android project ---
       - name: Confirm Gradle project files
+        shell: bash
         run: |
-          ls -lah "$APP_DIR"
-          test -f "$APP_DIR/build.gradle" || { echo "missing root build.gradle"; exit 1; }
-          test -f "$APP_DIR/settings.gradle" || { echo "missing settings.gradle"; exit 1; }
-          test -f "$APP_DIR/gradle.properties" || { echo "missing gradle.properties"; exit 1; }
-          test -f "$APP_DIR/${APP_MODULE}/build.gradle" || { echo "missing app/build.gradle"; exit 1; }
+          set -e
+          test -f "$PROJECT_DIR/settings.gradle" || { echo "Missing settings.gradle at project root ($PROJECT_DIR)"; exit 1; }
+          test -f "$PROJECT_DIR/build.gradle" || { echo "Missing root build.gradle at project root ($PROJECT_DIR)"; exit 1; }
+          test -f "$PROJECT_DIR/$APP_MODULE/build.gradle" || { echo "Missing $APP_MODULE/build.gradle"; exit 1; }
+          echo "Gradle files present."
 
-      # --- If gradle wrapper is missing, generate one (install gradle once via apt) ---
-      - name: Set up a managed Gradle
+      # ---------- Make sure a Gradle wrapper exists ----------
+      - name: Generate Gradle wrapper if missing
+        shell: bash
+        working-directory: extracted
         run: |
-          if [ ! -f "$APP_DIR/gradlew" ]; then
-            sudo apt-get update
-            sudo apt-get install -y gradle
-            (cd "$APP_DIR" && gradle -v && gradle wrapper --gradle-version 8.7)
+          set -e
+          if [ ! -f "./gradlew" ]; then
+            echo "No gradlew found. Bootstrapping wrapper..."
+            GRADLE_VER=8.7
+            curl -sSL "https://services.gradle.org/distributions/gradle-${GRADLE_VER}-bin.zip" -o gradle.zip
+            unzip -q gradle.zip -d gradle_dist
+            rm -f gradle.zip
+            ./gradle_dist/gradle-${GRADLE_VER}/bin/gradle -q wrapper --gradle-version "${GRADLE_VER}"
           fi
-          chmod +x "$APP_DIR/gradlew"
-
-      - name: Generate Gradle wrapper (best-effort)
-        run: |
-          # If the previous step created it, this is a no-op; if it already existed, also fine.
-          test -f "$APP_DIR/gradlew" || (cd "$APP_DIR" && gradle wrapper --gradle-version 8.7 || true)
-          chmod +x "$APP_DIR/gradlew"
+          chmod +x ./gradlew
+          ./gradlew --version
 
       - name: Print versions
+        shell: bash
         run: |
           java -version
-          adb version || true
-          sdkmanager --version
-          (cd "$APP_DIR" && ./gradlew --version)
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --version || true
 
-      # --- Build (prefer Release; fall back to Debug) ---
-      - name: Build (Release else Debug)
+      # ---------- Build APK (Release → Debug fallback) ----------
+      - name: Build APK
+        shell: bash
         working-directory: extracted
         run: |
           set -e
           ./gradlew --no-daemon :${APP_MODULE}:assembleRelease || ./gradlew --no-daemon :${APP_MODULE}:assembleDebug
 
-      # --- Find the biggest APK produced (unsigned/signed depending on project config) ---
+      # ---------- Collect largest unsigned APK ----------
       - name: Collect APKs
         id: apks
+        shell: bash
         run: |
-          OUT="$(pwd)/${APP_DIR}/${APP_MODULE}/build/outputs/apk"
-          echo "Outputs @ $OUT"
+          set -e
+          OUT="$PROJECT_DIR/${APP_MODULE}/build/outputs/apk"
+          echo "Searching in: $OUT"
           find "$OUT" -type f -name "*.apk" -printf "%s %p\n" | sort -nr | head -n 20
-          APK_PATH="$(find "$OUT" -type f -name "*.apk" -printf "%s %p\n" | sort -nr | head -n 1 | cut -d' ' -f2-)"
-          test -n "$APK_PATH"
-          echo "apk=$APK_PATH" >> $GITHUB_OUTPUT
-          echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
+          UNSIGNED=$(find "$OUT" -type f -name "*.apk" -printf "%s %p\n" | sort -nr | head -n 1 | cut -d' ' -f2-)
+          test -n "$UNSIGNED"
+          echo "unsigned=$UNSIGNED" >> "$GITHUB_OUTPUT"
+          echo "Selected unsigned: $UNSIGNED"
 
-      # --- Zipalign + sign with debug keystore so you get an installable APK even if project builds unsigned ---
+      # ---------- Zipalign ----------
       - name: Zipalign
+        shell: bash
         run: |
-          ALIGNED="${RUNNER_TEMP}/${APK_PREFIX}-aligned.apk"
-          "$ANDROID_HOME/build-tools/${BUILD_TOOLS}/zipalign" -p -f 4 "$APK_PATH" "$ALIGNED"
-          echo "ALIGNED_APK=$ALIGNED" >> $GITHUB_ENV
+          set -e
+          UNSIGNED="${{ steps.apks.outputs.unsigned }}"
+          ALIGNED="${{ runner.temp }}/${{ env.APK_PREFIX }}-aligned.apk"
+          "$ANDROID_HOME/build-tools/${BUILD_TOOLS}/zipalign" -p -f 4 "$UNSIGNED" "$ALIGNED"
+          echo "ALIGNED_APK=$ALIGNED" >> "$GITHUB_ENV"
 
-      - name: Create debug keystore (CI)
+      # ---------- Create debug keystore & Sign ----------
+      - name: Create CI debug keystore
+        shell: bash
         run: |
-          KEYSTORE="${RUNNER_TEMP}/debug.keystore"
+          set -e
+          KEYSTORE="${{ runner.temp }}/debug.keystore"
           keytool -genkeypair -v \
             -keystore "$KEYSTORE" -storepass android \
             -alias androiddebugkey -keypass android \
             -keyalg RSA -keysize 2048 -validity 10000 \
             -dname "CN=Android Debug,O=Android,C=US"
-          echo "DEBUG_KEYSTORE=$KEYSTORE" >> $GITHUB_ENV
+          echo "DEBUG_KEYSTORE=$KEYSTORE" >> "$GITHUB_ENV"
 
       - name: Sign APK
+        shell: bash
         run: |
-          SIGNED="${RUNNER_TEMP}/${APK_PREFIX}-Signed.apk"
+          set -e
+          SIGNED="${{ runner.temp }}/${{ env.APK_PREFIX }}-Signed.apk"
           "$ANDROID_HOME/build-tools/${BUILD_TOOLS}/apksigner" sign \
             --ks "$DEBUG_KEYSTORE" \
             --ks-pass pass:android \
@@ -122,20 +152,18 @@ jobs:
             --out "$SIGNED" \
             "$ALIGNED_APK"
           "$ANDROID_HOME/build-tools/${BUILD_TOOLS}/apksigner" verify --verbose "$SIGNED"
-          echo "SIGNED_APK=$SIGNED" >> $GITHUB_ENV
+          echo "SIGNED_APK=$SIGNED" >> "$GITHUB_ENV"
 
-      # --- Upload artifacts ---
-      - name: Upload raw APK(s) from build
+      # ---------- Upload artifacts ----------
+      - name: Upload unsigned APK
         uses: actions/upload-artifact@v4
         with:
-          name: Raw-APKs
-          path: |
-            ${{ env.APK_PATH }}
-            extracted/**/outputs/apk/**/*.apk
-          if-no-files-found: warn
+          name: ${{ env.APK_PREFIX }}-Unsigned.apk
+          path: ${{ steps.apks.outputs.unsigned }}
+          if-no-files-found: error
           retention-days: 7
 
-      - name: Upload signed APK (installable)
+      - name: Upload signed APK
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.APK_PREFIX }}-Signed.apk
