@@ -18,28 +18,28 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '17'
-          
+
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
         with:
           api-level: 34
           target: default
           arch: x86_64
-          
-      - name: Install unzip & gradle
-        run: sudo apt-get update && sudo apt-get install -y unzip gradle
 
-      - name: Extract project (if your ZIP actually contains a Gradle app)
+      - name: Install unzip
+        run: sudo apt-get update && sudo apt-get install -y unzip
+
+      - name: Extract project (if ZIP has Gradle app)
         run: |
           unzip -q NuYouPDFTextReplacer_SignedSource.zip -d project || echo "ZIP not found or already extracted"
           echo "Gradle files found under ./project (if any):"
           find project -maxdepth 3 -type f -name "build.gradle*" -o -name "settings.gradle" || true
 
-      # Always create a minimal fallback project in a known absolute path
       - name: Prepare fallback NuYou+ app
         run: |
           PROJECT_DIR="${GITHUB_WORKSPACE}/unsignedApk"
           mkdir -p "${PROJECT_DIR}/app/src/main/java/com/nuyouplus/pdftextreplacer"
+
           cat > "${PROJECT_DIR}/settings.gradle" <<'EOF'
           rootProject.name = "NuYouPDFTextReplacer"
           include(":app")
@@ -104,14 +104,18 @@ jobs:
           echo "== Project tree =="
           ls -R "${PROJECT_DIR}"
 
+      - name: Download and use Gradle 8.2.1
+        run: |
+          wget https://services.gradle.org/distributions/gradle-8.2.1-bin.zip
+          unzip -q gradle-8.2.1-bin.zip -d $HOME/gradle
+          export PATH="$HOME/gradle/gradle-8.2.1/bin:$PATH"
+          gradle -v
+
       - name: Build unsigned APK
         run: |
           PROJECT_DIR="${GITHUB_WORKSPACE}/unsignedApk"
           cd "${PROJECT_DIR}"
-          # Ensure Gradle wrapper exists and uses a compatible version
-          gradle wrapper --gradle-version 8.7
-          chmod +x ./gradlew
-          ./gradlew clean assembleRelease --no-daemon
+          gradle clean assembleRelease --no-daemon
 
       - name: Upload unsigned APK
         uses: actions/upload-artifact@v4
