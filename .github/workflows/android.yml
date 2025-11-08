@@ -22,71 +22,79 @@ jobs:
       - name: Install unzip & gradle
         run: sudo apt-get update && sudo apt-get install -y unzip gradle
 
-      - name: Extract project
+      - name: Extract project (if your ZIP actually contains a Gradle app)
         run: |
-          echo "Unzipping..."
-          unzip -q NuYouPDFTextReplacer_SignedSource.zip -d project || echo "no zip?"
-          cd project
-          find . -type f -name "*.gradle*" | head -n 5 || echo "no gradle files?"
+          unzip -q NuYouPDFTextReplacer_SignedSource.zip -d project || echo "ZIP not found or already extracted"
+          echo "Gradle files found under ./project (if any):"
+          find project -maxdepth 3 -type f -name "build.gradle*" -o -name "settings.gradle" || true
 
-      - name: Fallback dummy app build (if no Gradle project found)
+      # Always create a minimal fallback project in a known absolute path
+      - name: Prepare fallback NuYou+ app
         run: |
-          mkdir -p ~/unsignedApk/app/src/main/java/com/nuyouplus/pdftextreplacer
-          cat <<EOF > ~/unsignedApk/app/src/main/java/com/nuyouplus/pdftextreplacer/MainActivity.java
+          PROJECT_DIR="${GITHUB_WORKSPACE}/unsignedApk"
+          mkdir -p "${PROJECT_DIR}/app/src/main/java/com/nuyouplus/pdftextreplacer"
+          cat > "${PROJECT_DIR}/settings.gradle" <<'EOF'
+          rootProject.name = "NuYouPDFTextReplacer"
+          include(":app")
+          EOF
+
+          cat > "${PROJECT_DIR}/build.gradle" <<'EOF'
+          buildscript {
+            repositories { google(); mavenCentral() }
+            dependencies { classpath 'com.android.tools.build:gradle:8.2.1' }
+          }
+          allprojects { repositories { google(); mavenCentral() } }
+          EOF
+
+          cat > "${PROJECT_DIR}/app/build.gradle" <<'EOF'
+          apply plugin: 'com.android.application'
+          android {
+            namespace "com.nuyouplus.pdftextreplacer"
+            compileSdkVersion 34
+            defaultConfig {
+              applicationId "com.nuyouplus.pdftextreplacer"
+              minSdkVersion 24
+              targetSdkVersion 34
+              versionCode 1
+              versionName "1.0"
+            }
+            buildTypes { release { minifyEnabled false } }
+          }
+          dependencies { }
+          EOF
+
+          cat > "${PROJECT_DIR}/app/src/main/AndroidManifest.xml" <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+              package="com.nuyouplus.pdftextreplacer">
+            <application android:label="NūYOU+ PDF Text Replacer">
+              <activity android:name=".MainActivity">
+                <intent-filter>
+                  <action android:name="android.intent.action.MAIN"/>
+                  <category android:name="android.intent.category.LAUNCHER"/>
+                </intent-filter>
+              </activity>
+            </application>
+          </manifest>
+          EOF
+
+          cat > "${PROJECT_DIR}/app/src/main/java/com/nuyouplus/pdftextreplacer/MainActivity.java" <<'EOF'
           package com.nuyouplus.pdftextreplacer;
           import android.app.Activity;
           import android.os.Bundle;
           import android.widget.TextView;
           public class MainActivity extends Activity {
-              protected void onCreate(Bundle b) {
-                  super.onCreate(b);
-                  TextView t = new TextView(this);
-                  t.setText("NūYOU+ PDF Text Replacer");
-                  setContentView(t);
-              }
+            protected void onCreate(Bundle b) {
+              super.onCreate(b);
+              TextView t = new TextView(this);
+              t.setText("NūYOU+ PDF Text Replacer");
+              t.setTextSize(22f);
+              t.setPadding(60, 200, 60, 60);
+              setContentView(t);
+            }
           }
           EOF
 
-          cat <<EOF > ~/unsignedApk/settings.gradle
-          rootProject.name = "NuYouPDFTextReplacer"
-          EOF
-
-          cat <<EOF > ~/unsignedApk/app/build.gradle
-          apply plugin: 'com.android.application'
-          android {
-              compileSdkVersion 34
-              defaultConfig {
-                  applicationId "com.nuyouplus.pdftextreplacer"
-                  minSdkVersion 24
-                  targetSdkVersion 34
-                  versionCode 1
-                  versionName "1.0"
-              }
-              buildTypes {
-                  release {
-                      minifyEnabled false
-                  }
-              }
-          }
-          dependencies {}
-          EOF
-
-          cat <<EOF > ~/unsignedApk/build.gradle
-          buildscript {
-              repositories { google(); mavenCentral() }
-              dependencies { classpath 'com.android.tools.build:gradle:8.2.1' }
-          }
-          allprojects { repositories { google(); mavenCentral() } }
-          apply from: "app/build.gradle"
-          EOF
+          echo "== Project tree =="
+          ls -R "${PROJECT_DIR}"
 
       - name: Build unsigned APK
-        working-directory: ~/unsignedApk
-        run: |
-          gradle clean assembleRelease --no-daemon
-
-      - name: Upload unsigned APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: NuYouPlus-Unsigned.apk
-          path: ~/unsignedApk/app/build/outputs/apk/release/app-release-unsigned.apk
