@@ -1,0 +1,56 @@
+name: Android CI (Unsigned APK)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          api-level: 34
+          target: default
+          arch: x86_64
+
+      - name: Unzip project
+        run: |
+          unzip -q NuYouPDFTextReplacer_SignedSource.zip -d project
+          # accommodate either name I generated
+          cd project
+          if [ -d "NuYouPDFTextReplacer_SignedSource" ]; then
+            echo "PROJECT_DIR=NuYouPDFTextReplacer_SignedSource" >> $GITHUB_ENV
+          elif [ -d "NuYouPDFTextReplacer_Signed" ]; then
+            echo "PROJECT_DIR=NuYouPDFTextReplacer_Signed" >> $GITHUB_ENV
+          else
+            echo "Project dir not found"; exit 1
+          fi
+
+      - name: Build unsigned release APK
+        working-directory: project/${{ env.PROJECT_DIR }}
+        run: |
+          if [ ! -f "./gradlew" ]; then
+            gradle wrapper --gradle-version 8.7
+            chmod +x gradlew
+          fi
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-unsigned.apk
+          path: project/${{ env.PROJECT_DIR }}/app/build/outputs/apk/release/app-release-unsigned.apk
